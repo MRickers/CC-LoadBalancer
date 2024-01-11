@@ -4,9 +4,33 @@ import (
 	"bufio"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 )
 
-func forwardHandler(w http.ResponseWriter, r *http.Request) {
+var backendServers = [2]string{"http://localhost:8081", "http://localhost:8082"}
+var ops atomic.Uint64
+
+func roundRobin() uint64 {
+	backendServerIndex := ops.Load()
+	fmt.Println("Index: ", backendServerIndex)
+
+	if backendServerIndex >= 2 {
+		ops.Store(1)
+		return 0
+	} else {
+		ops.Add(1)
+		return backendServerIndex
+	}
+}
+
+func roundRobinBalancer(forwardHandler func(w http.ResponseWriter, r *http.Request, backendUrl string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		backendServer := backendServers[roundRobin()]
+		forwardHandler(w, r, backendServer)
+	}
+}
+
+func forwardHandler(w http.ResponseWriter, r *http.Request, backendUrl string) {
 	response := "Received request from " + r.RemoteAddr
 	response += "\n" + r.Method + " " + r.RequestURI + " " + r.Proto
 	response += "\nHost: " + r.Host
@@ -15,8 +39,7 @@ func forwardHandler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println(response)
 
-	url := "http://localhost:8081"
-	resp, err := http.Get(url)
+	resp, err := http.Get(backendUrl)
 	if err != nil {
 		panic(err)
 	}
@@ -41,7 +64,7 @@ func forwardHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/", forwardHandler)
+	http.HandleFunc("/", roundRobinBalancer(forwardHandler))
 
 	http.ListenAndServe(":8080", nil)
 }
