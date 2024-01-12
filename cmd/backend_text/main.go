@@ -6,7 +6,7 @@ import (
 )
 
 func forwardHandler(w http.ResponseWriter, r *http.Request) {
-	response := "Received request from " + r.RemoteAddr
+	response := "\nReceived request from " + r.RemoteAddr
 	response += "\n" + r.Method + " " + r.RequestURI + " " + r.Proto
 	response += "\nHost: " + r.Host
 	response += "\nUser-Agent: " + r.UserAgent()

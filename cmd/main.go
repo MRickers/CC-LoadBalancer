@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"net/http"
+	"net"
+	"strings"
 	"sync/atomic"
 )
 
-var backendServers = [2]string{"http://localhost:8081", "http://localhost:8082"}
+var backendServers = [2]string{"localhost:8081", "localhost:8082"}
 var ops atomic.Uint64
 
 func roundRobin() uint64 {
@@ -23,48 +23,83 @@ func roundRobin() uint64 {
 	}
 }
 
-func roundRobinBalancer(forwardHandler func(w http.ResponseWriter, r *http.Request, backendUrl string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		backendServer := backendServers[roundRobin()]
-		forwardHandler(w, r, backendServer)
+func forwardMessage(data []byte, backendServerUrl string) ([]byte, error) {
+	connection, err := net.Dial("tcp", backendServerUrl)
+	if err != nil {
+		return nil, fmt.Errorf("could not connect to backend server")
 	}
+	defer connection.Close()
+
+	_, err = connection.Write(data)
+	if err != nil {
+		return nil, err
+	}
+
+	buffer := make([]byte, 1024)
+	_, err = connection.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+	return buffer, nil
 }
 
-func forwardHandler(w http.ResponseWriter, r *http.Request, backendUrl string) {
-	response := "Received request from " + r.RemoteAddr
-	response += "\n" + r.Method + " " + r.RequestURI + " " + r.Proto
-	response += "\nHost: " + r.Host
-	response += "\nUser-Agent: " + r.UserAgent()
-	response += "\nAccept: " + r.Header.Get("Accept") + "\n"
+func printHttpStatus(httpResponse []byte) error {
+	responseString := string(httpResponse)
+	firstLineIndex := strings.Index(responseString, "\n")
+	if firstLineIndex == -1 {
+		return fmt.Errorf("invalid http status response")
+	}
 
-	fmt.Println(response)
+	fmt.Println("Response from server: ", responseString[0:firstLineIndex])
+	return nil
+}
 
-	resp, err := http.Get(backendUrl)
+func handleConnection(conn net.Conn, backendServerUrl string) {
+	defer conn.Close()
+
+	buffer := make([]byte, 1024)
+	_, err := conn.Read(buffer)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error reading: ", err)
+		return
 	}
-	defer resp.Body.Close()
+	fmt.Println("Received request from: ", conn.RemoteAddr().String())
+	fmt.Println(string(buffer))
 
-	fmt.Println("Response from server: " + resp.Proto + " " + resp.Status + "\n\n")
+	response, err := forwardMessage(buffer, backendServerUrl)
 
-	backend_response := ""
-	scanner := bufio.NewScanner(resp.Body)
-	for i := 0; scanner.Scan() && i < 5; i++ {
-		backend_response += scanner.Text()
+	if err != nil {
+		fmt.Println("Forward message failed: ", err)
+		return
+	}
+	err = printHttpStatus(response)
+	if err != nil {
+		fmt.Println("backend response error: ", err)
+		return
 	}
 
-	if err := scanner.Err(); err != nil {
-		panic(err)
+	_, err = conn.Write(response)
+	if err != nil {
+		fmt.Println("could not respond to client")
 	}
-	fmt.Println(backend_response)
-
-	w.WriteHeader(resp.StatusCode)
-	w.Write([]byte(backend_response))
 
 }
 
 func main() {
-	http.HandleFunc("/", roundRobinBalancer(forwardHandler))
 
-	http.ListenAndServe(":8080", nil)
+	listener, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err)
+			continue
+		}
+		go handleConnection(conn, backendServers[roundRobin()])
+	}
+
 }
