@@ -3,23 +3,67 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
-	"sync/atomic"
+	"sync"
+	"time"
 )
 
-var backendServers = [2]string{"localhost:8081", "localhost:8082"}
-var ops atomic.Uint64
+type BackendServers struct {
+	backendUrls []string
+	mu          sync.Mutex
+	urlIndex    int
+}
 
-func roundRobin() uint64 {
-	backendServerIndex := ops.Load()
-	fmt.Println("Index: ", backendServerIndex)
+func (b *BackendServers) add(backendServer string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	if backendServerIndex >= 2 {
-		ops.Store(1)
-		return 0
+	b.backendUrls = append(b.backendUrls, backendServer)
+}
+
+func (b *BackendServers) remove(backenServer string) {
+	contains, index := b.contains(backenServer)
+	if contains {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.backendUrls = append(b.backendUrls[:index], b.backendUrls[index+1:]...)
+	}
+}
+
+func (b *BackendServers) contains(backendServer string) (bool, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for index, server := range b.backendUrls {
+		if server == backendServer {
+			return true, index
+		}
+	}
+	return false, 0
+}
+
+func (b *BackendServers) nextRoundRobinServer() (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if len(b.backendUrls) < 1 {
+		return "", fmt.Errorf("no backend server available")
+	}
+
+	b.urlIndex += 1
+	if b.urlIndex >= len(b.backendUrls) {
+		b.urlIndex = 0
+		return b.backendUrls[len(b.backendUrls)-1], nil
 	} else {
-		ops.Add(1)
-		return backendServerIndex
+		return b.backendUrls[b.urlIndex-1], nil
+	}
+}
+
+func NewBackendServers() BackendServers {
+	return BackendServers{
+		backendUrls: []string{"localhost:8081", "localhost:8082"},
+		urlIndex:    0,
 	}
 }
 
@@ -54,7 +98,7 @@ func printHttpStatus(httpResponse []byte) error {
 	return nil
 }
 
-func handleConnection(conn net.Conn, backendServerUrl string) {
+func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	buffer := make([]byte, 1024)
@@ -66,7 +110,13 @@ func handleConnection(conn net.Conn, backendServerUrl string) {
 	fmt.Println("Received request from: ", conn.RemoteAddr().String())
 	fmt.Println(string(buffer))
 
-	response, err := forwardMessage(buffer, backendServerUrl)
+	backendUrl, err := backendServers.nextRoundRobinServer()
+	if err != nil {
+		fmt.Println(err)
+		conn.Write([]byte(err.Error()))
+		return
+	}
+	response, err := forwardMessage(buffer, backendUrl)
 
 	if err != nil {
 		fmt.Println("Forward message failed: ", err)
@@ -85,7 +135,39 @@ func handleConnection(conn net.Conn, backendServerUrl string) {
 
 }
 
+var backendServers = NewBackendServers()
+var backendUrls = []string{"localhost:8081", "localhost:8082"}
+
 func main() {
+	go func() {
+		for {
+			fmt.Println("doing health check")
+			for _, backend := range backendUrls {
+				response, err := http.Get("http://" + backend + "/healthCheck")
+				if err != nil {
+					contains, _ := backendServers.contains(backend)
+					if contains {
+						fmt.Println("removing " + backend + " from backendList")
+						backendServers.remove(backend)
+					}
+					continue
+				}
+				contains, _ := backendServers.contains(backend)
+				if response.StatusCode != http.StatusOK {
+					if contains {
+						fmt.Println("removing " + backend + " from backendList")
+						backendServers.remove(backend)
+					}
+				} else {
+					if !contains {
+						fmt.Println("adding " + backend + " to backendList")
+						backendServers.add(backend)
+					}
+				}
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}()
 
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -99,7 +181,6 @@ func main() {
 			fmt.Println("Error accepting connection: ", err)
 			continue
 		}
-		go handleConnection(conn, backendServers[roundRobin()])
+		go handleConnection(conn)
 	}
-
 }

@@ -20,6 +20,8 @@ func forwardHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/", forwardHandler)
-
+	http.HandleFunc("/healthCheck", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	http.ListenAndServe(":8081", nil)
 }
